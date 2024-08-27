@@ -1,11 +1,11 @@
 
-use futures::{stream, Sink, StreamExt};
+use futures::{stream, Sink, StreamExt, TryFutureExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::error::SendError;
 use tokio_postgres::{Error, NoTls};
 use std::pin::Pin;
 
 use std::fmt::Debug;
-use std::io::Write;
 
 use std::task::{Context, Poll};
 
@@ -24,51 +24,58 @@ struct Message {
 }
 
 impl Writer for Message { 
-    fn write(&self, mut file : std::fs::File) -> Result<(), WriteError> {
+    async fn write(&self, mut file : tokio::fs::File) -> Result<(), WriteError> {
         let bytes = serde_json::to_vec(&self).unwrap();
-        let written = file.write_all(&bytes).map_err(|_| WriteError{});
-        let _ = file.write_all(b"\n");
-        let _ = file.flush();
-        written
+        //let mut file = tokio::fs::OpenOptions::new().create(true).append(true).open(filepath).await.unwrap();
+        
+            if let Err(err) = file.write_all(&bytes).map_err(|_| WriteError{}).await { 
+                return Err(err);
+            }
+            if let Err(err)  = file.write_all(b"\n").map_err(|_| WriteError{}).await { 
+                return Err(err);
+            }
+            if let Err(err)  = file.flush().map_err(|_| WriteError{}).await { 
+                return Err(err);
+            }
+        
+        Ok(())
     }
 }
 
 
 
 pub async fn async_connector<T>() -> Result<(), Error> 
-where T : Serialize + for <'a> serde::de::Deserialize<'a> +  Debug + Writer
+where T : Serialize + for <'a> serde::de::Deserialize<'a> +  Debug + Writer +std::marker::Send + std::marker::Sync
 { 
     let (client, mut conn) = tokio_postgres::connect("host=localhost user=demo password=demo dbname=demo_db", NoTls).await?;
     println!("conn : {:?}", conn.parameter("host"));
     
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<tokio_postgres::AsyncMessage>();
-    println!("here");
 
     // by polling the futures of the connection socket stream we create a stream of futures which is the way forward, 
     let stream = stream::poll_fn(move |cx | conn.poll_message(cx).map_err(|err| panic!("{err}")) );
-    println!("before spin");
     // afterwards the task to forward the stream to SenderSink which implements Sink is spawned, 
     let forward_task = tokio::spawn(async move { 
-        println!("spinning");
         stream.forward(SenderSink(tx)).await.expect("send") 
     });
-    println!("listening..");
     client.batch_execute("LISTEN activity_channel;").await.expect("litening error");
     
-    while let Some(msg) = rx.recv().await { 
-        let tokio_postgres::AsyncMessage::Notification(noti) = msg else { 
-            todo!()
-        };
-        let p = noti.payload();
-        let message = Row::deserialize(p).unwrap();
+    while let Some(msg) = rx.recv().await {
+        println!("received message"); 
+        let a = tokio::spawn(async move { 
+            let tokio_postgres::AsyncMessage::Notification(noti) = msg else { 
+                todo!()
+            };
+            println!("here");
+            let p = noti.payload();
+            let message = Row::deserialize(p).unwrap();
+            
+            //let str = String::from_utf8(buf.to_vec()).expect("not valid utf-8");
+            let file =  tokio::fs::OpenOptions::new().create(true).write(true).append(true).open("./output.bin").await.unwrap();
+            let file_sink = SinkWriter::<T>{t: message};
+            let _ = file_sink.write(file).await;
+        });
         
-        //let str = String::from_utf8(buf.to_vec()).expect("not valid utf-8");
-        let file =  std::fs::OpenOptions::new().create(true).write(true).append(true).open("./output.bin").unwrap();
-        let file_sink = SinkWriter::<T>{t: message};
-        println!("writing..");
-        if let Err(err) = file_sink.write(file) { 
-            eprintln!("write error : {err:?}")
-        }
         //println!("msg : {message:#?}");
     }
     

@@ -31,9 +31,11 @@ pub struct SinkWriter<T: Writer> {
     pub t : T
 }
 
+
 impl<T:Writer> SinkWriter<T> {
-    pub fn write(&self, file: std::fs::File) -> Result<(),WriteError > { 
-        self.t.write(file)
+    pub async fn write(&self, file: tokio::fs::File) -> Result<(), WriteError> { 
+        let a = self.t.write(file).await;
+        a
     }
 }
 #[derive(Debug)] 
@@ -43,5 +45,5 @@ pub struct WriteError {
 
 
 pub trait Writer { 
-    fn write(&self, file: std::fs::File) -> Result<(),WriteError>;
+    fn write(&self, file: tokio::fs::File) -> impl std::future::Future<Output = Result<(),WriteError>> + std::marker::Send;
 }
